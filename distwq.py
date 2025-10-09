@@ -35,6 +35,7 @@ import importlib
 import json
 import logging
 import os
+import pickle
 import random
 import signal
 import sys
@@ -160,6 +161,7 @@ class MPIController(object):
         self.workers_available = True if size > 1 else False
 
         self.count = 0
+        self.recvbuf = bytearray(1 << 20)  # 1 MB default buffer
 
         self.start_time = start_time
         self.time_limit = time_limit
@@ -242,14 +244,21 @@ class MPIController(object):
         if not self.workers_available:
             return
         count = 0
-        while self.comm.Iprobe(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG):
+        status = MPI.Status()
+        while self.comm.Iprobe(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status):
             if (limit is not None) and (limit < count):
                 break
 
-            status = MPI.Status()
-            data = self.comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
             worker = status.Get_source()
             tag = status.Get_tag()
+            byte_count = status.Get_count(MPI.BYTE)
+            if len(self.recvbuf) < byte_count:
+                self.recvbuf = bytearray(byte_count)
+
+            self.comm.Recv([self.recvbuf[:byte_count], MPI.BYTE], 
+                           source=status.Get_source(), 
+                           tag=status.Get_tag())
+
             if tag == MessageTag.READY.value:
                 if worker not in self.ready_workers:
                     self.ready_workers.append(worker)
@@ -259,7 +268,7 @@ class MPIController(object):
                     f"MPI controller : received READY message from worker {worker}"
                 )
             elif tag == MessageTag.DONE.value:
-                task_id, results, stats = data
+                (task_id, results, stats) = pickle.loads(self.recvbuf[:byte_count])
                 logger.info(
                     f"MPI controller : received DONE message for task {task_id} "
                     f"from worker {worker}"
