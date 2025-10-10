@@ -255,12 +255,13 @@ class MPIController(object):
             if len(self.recvbuf) < byte_count:
                 self.recvbuf = bytearray(byte_count)
 
-            self.comm.Recv([self.recvbuf[:byte_count], MPI.BYTE], 
-                           source=status.Get_source(), 
-                           tag=status.Get_tag())
+            self.comm.Recv([self.recvbuf, byte_count, MPI.BYTE], source=worker, tag=tag)
 
             if tag == MessageTag.READY.value:
                 if worker not in self.ready_workers:
+                    data = None
+                    if byte_count > 0:
+                        data = pickle.loads(self.recvbuf[:byte_count])
                     self.ready_workers.append(worker)
                     self.ready_workers_data[worker] = data
                     self.active_workers.add(worker)
@@ -1016,15 +1017,16 @@ class MPIWorker(object):
         while not exit_flag:
             # signal the controller this worker is ready
             if ready:
-                req = self.comm.isend(
-                    self.ready_data, dest=0, tag=MessageTag.READY.value
+                ready_bytes = pickle.dumps(self.ready_data)
+                req = self.comm.Isend(
+                    [ready_bytes, MPI.BYTE], dest=0, tag=MessageTag.READY.value
                 )
                 req.wait()
 
             # get next task from queue:
-            if self.comm.Iprobe(source=0, tag=MPI.ANY_TAG):
-                data = self.comm.recv(source=0, tag=MPI.ANY_TAG, status=status)
+            if self.comm.Iprobe(source=0, tag=MPI.ANY_TAG, status=status):
                 tag = status.Get_tag()
+                data = self.comm.recv(source=0, tag=tag)
 
                 # TODO: add timeout and check whether controller lives!
                 object_to_call = None
@@ -1062,8 +1064,9 @@ class MPIWorker(object):
                         "total_time": time.time() - start_time,
                     }
                 )
-                req = self.comm.isend(
-                    (task_id, result, self.stats[-1]), dest=0, tag=MessageTag.DONE.value
+                data_bytes = pickle.dumps((task_id, result, self.stats[-1]))
+                req = self.comm.Isend(
+                    [data_bytes, MPI.BYTE], dest=0, tag=MessageTag.DONE.value
                 )
                 req.wait()
                 ready = True
@@ -1347,7 +1350,10 @@ class MPICollectiveBroker(object):
         # wait for orders:
         while True:
             # signal the controller this worker is ready
-            req = self.comm.isend(self.ready_data, dest=0, tag=MessageTag.READY.value)
+            ready_bytes = pickle.dumps(self.ready_data)
+            req = self.comm.Isend(
+                [ready_bytes, MPI.BYTE], dest=0, tag=MessageTag.READY.value
+            )
             req.wait()
             logger.info(
                 f"MPI collective broker {self.worker_id}: "
@@ -1436,8 +1442,9 @@ class MPICollectiveBroker(object):
                 f"MPI collective broker {self.worker_id}: "
                 "sending results to controller..."
             )
-            req = self.comm.isend(
-                (task_id, results, stat), dest=0, tag=MessageTag.DONE.value
+            data_bytes = pickle.dumps((task_id, results, stat))
+            req = self.comm.Isend(
+                [data_bytes, MPI.BYTE], dest=0, tag=MessageTag.DONE.value
             )
             req.wait()
 
@@ -1529,10 +1536,10 @@ class MPICollectiveBroker(object):
         ]
     ]:
         status = MPI.Status()
-        if self.comm.Iprobe(source=0, tag=MPI.ANY_TAG):
+        if self.comm.Iprobe(source=0, tag=MPI.ANY_TAG, status=status):
             # get next task from controller queue:
-            data = self.comm.recv(source=0, tag=MPI.ANY_TAG, status=status)
             tag = status.Get_tag()
+            data = self.comm.recv(source=0, tag=tag)
             return tag, data
         else:
             time.sleep(1)
